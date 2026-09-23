@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from whysync.config import Pair
-from whysync.i18n import t
+from whysync.i18n import t, tn
 from whysync.ui.gi_ready import Adw, Gtk, Pango
 from whysync.ui.model import RowView, last_summary
 from whysync.ui.round_view import KINDS, kind_rows
@@ -24,6 +24,8 @@ class DetailHandlers:
     review: Callable[[str], None]
     remove: Callable[[str], None]
     trash: Callable[[str], None]
+    settings: Callable[[str], None]
+    repair: Callable[[str], None]
     open_folder: Callable[[str], None]
 
 
@@ -43,6 +45,8 @@ class PairDetail(Adw.Bin):
         self._paths = {"source": "", "target": ""}
         self._last_key: tuple | None = None
         self._last_rows: list = []
+        self._mismatch_key: tuple | None = None
+        self._mismatch_rows: list = []
 
         self.title = Adw.WindowTitle()
         self.sync = _icon_button("view-refresh-symbolic", lambda: self._h.sync(self.pair_id))
@@ -88,6 +92,15 @@ class PairDetail(Adw.Bin):
         for widget in (self.bar, self.numbers, self.current):
             self.progress.append(widget)
         group.add(self.progress)
+
+        # Files whose contents differ from the source (content check).
+        self.mismatch = Adw.ExpanderRow(use_markup=False, visible=False)
+        self.mismatch.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
+        self.repair = Gtk.Button(valign=Gtk.Align.CENTER)
+        self.repair.add_css_class("suggested-action")
+        self.repair.connect("clicked", lambda *_: self._h.repair(self.pair_id))
+        self.mismatch.add_suffix(self.repair)
+        group.add(self.mismatch)
         return group
 
     def _folders_group(self) -> Adw.PreferencesGroup:
@@ -107,6 +120,10 @@ class PairDetail(Adw.Bin):
 
     def _more_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup()
+        self.settings = Adw.ActionRow(activatable=True, use_markup=False)
+        self.settings.add_prefix(Gtk.Image(icon_name="emblem-system-symbolic"))
+        self.settings.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+        self.settings.connect("activated", lambda *_: self._h.settings(self.pair_id))
         self.trash = Adw.ActionRow(activatable=True)
         self.trash.add_prefix(Gtk.Image(icon_name="user-trash-symbolic"))
         self.trash.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
@@ -117,6 +134,7 @@ class PairDetail(Adw.Bin):
         self.remove.add_css_class("flat")
         self.remove.connect("clicked", lambda *_: self._h.remove(self.pair_id))
         self.remove_row.add_suffix(self.remove)
+        group.add(self.settings)
         group.add(self.trash)
         group.add(self.remove_row)
         return group
@@ -151,11 +169,42 @@ class PairDetail(Adw.Bin):
         for row, which, label in ((self.source, "source", "ui.source"), (self.target, "target", "ui.target")):
             row.set_title(t(label))
             row.set_subtitle(self._paths[which])
+        self.settings.set_title(t("ui.settings.title"))
+        warn = (t("ui.settings.warn_after", days=pair.stale_days) if pair.stale_days
+                else t("ui.settings.warn_off"))
+        verify = (t("ui.settings.verify_after", days=pair.verify_days) if pair.verify_days
+                  else t("ui.settings.verify_off"))
+        self.settings.set_subtitle(t("ui.settings.summary", max_deletes=pair.max_deletes,
+                                     trash_days=pair.trash_days, warn=warn) + " · " + verify)
         self.trash.set_title(t("ui.trash.title"))
         self.trash.set_subtitle(t("ui.trash.row_hint"))
         self.remove_row.set_title(t("ui.remove_hint"))
         self.remove.set_label(t("ui.remove"))
+        self._show_mismatch(pair.id, st.get("verify") or {})
         self._show_last(pair.id, st.get("last_sync") or {})
+
+    def _show_mismatch(self, pair_id: str, verify: dict) -> None:
+        count = int(verify.get("count", 0))
+        self.mismatch.set_visible(count > 0)
+        self.mismatch.set_title(tn("ui.mismatch.title", count))
+        self.mismatch.set_subtitle(t("ui.mismatch.body"))
+        self.repair.set_label(t("ui.mismatch.repair"))
+        key = (pair_id, verify.get("at"))
+        if key == self._mismatch_key:
+            return  # keep the list as the user has it
+        self._mismatch_key = key
+        for row in self._mismatch_rows:
+            self.mismatch.remove(row)
+        self._mismatch_rows = []
+        for path in verify.get("sample", []):
+            item = Gtk.Label(label=path, xalign=0.0, ellipsize=Pango.EllipsizeMode.MIDDLE, tooltip_text=path,
+                             margin_top=4, margin_bottom=4, margin_start=12, margin_end=12)
+            item.add_css_class("monospace")
+            item.add_css_class("caption")
+            # Our own row: a bare label gets wrapped and could not be removed again.
+            row = Gtk.ListBoxRow(child=item, activatable=False, selectable=False)
+            self.mismatch.add_row(row)
+            self._mismatch_rows.append(row)
 
     def _show_last(self, pair_id: str, last: dict) -> None:
         self.last.set_title(t("ui.last_change_title"))

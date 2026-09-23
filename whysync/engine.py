@@ -115,11 +115,14 @@ def hold_reason(pair: Pair, plan: Plan, first_round: bool = False) -> str | None
     return None
 
 
-def _command(pair: Pair, *, dry: bool, max_delete: int = 0, backup_dir: str = "") -> list[str]:
+def _command(pair: Pair, *, dry: bool, max_delete: int = 0, backup_dir: str = "",
+             checksum: bool = False) -> list[str]:
     cmd = [
         "rsync", "-rt", "-8", "--modify-window=1", "--delete-delay",
         "--out-format=%i %n", "--stats", f"--exclude=/{TRASH_DIRNAME}/",
     ]
+    if checksum:
+        cmd.append("--checksum")  # compare contents, not just size and date
     cmd += [f"--exclude={pattern}" for pattern in pair.excludes]
     if dry:
         cmd.append("--dry-run")
@@ -219,12 +222,12 @@ def _new_backup_dir(pair: Pair, now: float) -> str:
     return f"{TRASH_DIRNAME}/{name}"
 
 
-def plan_sync(pair: Pair, on_proc: Callable | None = None) -> Plan | Outcome:
+def plan_sync(pair: Pair, on_proc: Callable | None = None, checksum: bool = False) -> Plan | Outcome:
     reason = readiness(pair)
     if reason:
         return Outcome("blocked", reason=reason)
     try:
-        code, out, err = _run(pair, _command(pair, dry=True), on_proc)
+        code, out, err = _run(pair, _command(pair, dry=True, checksum=checksum), on_proc)
     except OSError:
         return Outcome("blocked", reason="reason.target_missing")
     if code not in (_EXIT_OK, _EXIT_VANISHED):
@@ -239,13 +242,14 @@ def run_sync(
     now: float | None = None,
     on_progress: Callable[[dict], None] | None = None,
     first_round: bool = False,
+    checksum: bool = False,
 ) -> Outcome:
     """`on_progress` gets {"phase": "compare"}, then {"phase": "copy", totals}
     and a stream of byte / file counts while rsync copies. See `hold_reason`
     for when a round waits instead."""
     report = on_progress or (lambda _update: None)
     report({"phase": "compare"})
-    plan = plan_sync(pair, on_proc)
+    plan = plan_sync(pair, on_proc, checksum=checksum)
     if isinstance(plan, Outcome):
         return plan
     if plan.empty:
@@ -254,7 +258,7 @@ def run_sync(
         return Outcome("held", reason=reason, plan=plan)
 
     backup_dir = _new_backup_dir(pair, time.time() if now is None else now)
-    cmd = _command(pair, dry=False, max_delete=len(plan.deletions), backup_dir=backup_dir)
+    cmd = _command(pair, dry=False, max_delete=len(plan.deletions), backup_dir=backup_dir, checksum=checksum)
     report({"phase": "copy", "files_total": plan.creates + plan.updates, "bytes_total": plan.bytes,
             "files_done": 0, "bytes_done": 0, "rate": 0})
     try:
@@ -276,6 +280,25 @@ def run_sync(
     return outcome
 
 
+def verify(pair: Pair, on_proc: Callable | None = None) -> list[str] | Outcome:
+    """Files whose contents differ although their size and date match.
+
+    A normal round never looks at such files; they are copies that changed
+    under the hood (a failing disk, a tool that keeps the date). Reads every
+    file on both sides, so it is slow and runs rarely. Which side is wrong
+    cannot be told from here; repairing (a round with `checksum=True`) copies
+    the source's version and keeps the target's in the trash.
+    """
+    by_content = plan_sync(pair, on_proc, checksum=True)
+    if isinstance(by_content, Outcome):
+        return by_content
+    by_date = plan_sync(pair, on_proc)  # right after, so a file edited meanwhile is not a mismatch
+    if isinstance(by_date, Outcome):
+        return by_date
+    pending = set(by_date.created) | set(by_date.updated)
+    return sorted(set(by_content.updated) - pending)
+
+
 def adopt(pair: Pair, paths: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
     """Copy what exists only in the target into the source, so mirroring keeps it.
 
@@ -283,8 +306,8 @@ def adopt(pair: Pair, paths: list[str]) -> tuple[list[str], list[tuple[str, str]
     when empty). Never overwrites: a file that exists in the source by now is
     left alone. Returns (copied, [(path, error)]).
     """
-    if readiness(pair):
-        return [], [(rel, readiness(pair) or "") for rel in paths]
+    if reason := readiness(pair):
+        return [], [(rel, reason) for rel in paths]
     source, target = Path(pair.source), Path(pair.target)
     copied: list[str] = []
     failed: list[tuple[str, str]] = []

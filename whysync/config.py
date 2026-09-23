@@ -34,6 +34,10 @@ class Pair:
     full_sync_s: float = 3600.0
     max_deletes: int = 50
     trash_days: int = 30
+    # Warn when a pair has not finished a round for this many days (0: never).
+    stale_days: int = 7
+    # Compare contents every this many days to catch copies that went bad (0: never).
+    verify_days: int = 30
     excludes: list[str] = field(default_factory=list)
 
     @classmethod

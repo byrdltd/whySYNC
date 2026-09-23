@@ -151,6 +151,7 @@ class Daemon:
 
     def reconcile(self, pairs: list[config.Pair]) -> None:
         wanted = {p.id: p for p in pairs}
+        self._board.retain(set(wanted))
         with self._lock:
             for pid, worker in list(self._workers.items()):
                 if wanted.get(pid) != worker.pair:
@@ -170,13 +171,15 @@ class Daemon:
         cmd = msg.get("cmd")
         if cmd == "ping":
             return {"ok": True, "version": __version__, "pid": os.getpid()}
-        if cmd in ("sync", "approve", "adopt"):
+        if cmd in ("sync", "approve", "adopt", "repair"):
             with self._lock:
                 worker = self._workers.get(str(msg.get("pair")))
             if worker is None:
                 return {"ok": False, "error": "pair.unknown"}
             if cmd == "sync":
                 worker.request_sync()
+            elif cmd == "repair":
+                worker.repair()
             elif cmd == "approve":
                 worker.approve(str(msg.get("fingerprint") or ""))
             else:

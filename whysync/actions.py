@@ -12,6 +12,9 @@ from whysync import config, status
 from whysync.daemon import request
 
 UNIT = "whysync.service"
+# Settings a pair can change after it is added, with the values they accept.
+LIMITS = {"max_deletes": (1, 1_000_000), "trash_days": (1, 3650), "stale_days": (0, 3650),
+          "verify_days": (0, 3650)}
 
 
 class ActionError(Exception):
@@ -42,7 +45,19 @@ def pair_states() -> dict:
     return status.load().get("pairs", {})
 
 
+def _check_numbers(numbers: dict[str, int]) -> None:
+    for name, value in numbers.items():
+        low, high = LIMITS[name]
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ActionError("pair.bad_number", name=name, low=low, high=high)
+
+
+def _clean_excludes(patterns: list[str]) -> list[str]:
+    return [p.strip() for p in patterns if p.strip()]
+
+
 def add_pair(source: str, target: str, max_deletes: int = 50, excludes: list[str] | None = None) -> config.Pair:
+    _check_numbers({"max_deletes": max_deletes})
     cfg = config.load()
     source = str(Path(source).expanduser().absolute())
     target = str(Path(target).expanduser().absolute())
@@ -55,7 +70,7 @@ def add_pair(source: str, target: str, max_deletes: int = 50, excludes: list[str
         raise ActionError(error)
     pair = config.Pair(
         id=config.new_pair_id(cfg, source), source=source, target=target,
-        max_deletes=max_deletes, excludes=list(excludes or []),
+        max_deletes=max_deletes, excludes=_clean_excludes(excludes or []),
     )
     cfg.pairs.append(pair)
     status.set_first_round(pair.id, True)  # before the service can see the pair
@@ -79,6 +94,21 @@ def remove_pair(pair_id: str) -> config.Pair:
     return pair
 
 
+def update_pair(pair_id: str, *, excludes: list[str] | None = None, **numbers: int) -> config.Pair:
+    """Change a pair's limits and exclusions. Its folders never change: other
+    folders are a new pair, with a first round of their own."""
+    _check_numbers(numbers)
+    patterns = None if excludes is None else _clean_excludes(excludes)
+
+    def change(_cfg, pair: config.Pair) -> None:
+        for name, value in numbers.items():
+            setattr(pair, name, value)
+        if patterns is not None:
+            pair.excludes = patterns
+
+    return _edit(pair_id, change)
+
+
 def set_paused(pair_id: str, paused: bool) -> config.Pair:
     return _edit(pair_id, lambda _cfg, pair: setattr(pair, "paused", paused))
 
@@ -98,6 +128,11 @@ def sync_now(pair_id: str) -> None:
 
 def approve(pair_id: str, fingerprint: str) -> None:
     _command({"cmd": "approve", "pair": pair_id, "fingerprint": fingerprint})
+
+
+def repair(pair_id: str) -> None:
+    """Copy again the files whose contents differ from the source (old versions go to trash)."""
+    _command({"cmd": "repair", "pair": pair_id})
 
 
 def adopt(pair_id: str, fingerprint: str) -> None:

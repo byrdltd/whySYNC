@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from whysync import status
 from whysync.config import Pair
 from whysync.fmt import clock, done_summary, duration, size
 from whysync.i18n import t, tn
@@ -33,6 +34,8 @@ class RowView:
     paused: bool
     can_sync: bool
     held_count: int
+    # files whose contents differ from the source (last content check)
+    mismatch: int = 0
     # None: no bar; PULSE: busy with no known end; otherwise 0.0–1.0
     progress: float | None = None
     # the numbers behind the bar, and the file being copied (full relative path)
@@ -110,6 +113,8 @@ def row_view(pair: Pair, st: dict, service_up: bool, now: float | None = None) -
     if state == "idle":
         checked = when(st.get("checked_at"), now)
         subtitle = t("ui.sub.idle", when=checked) if checked else t("ui.sub.plain.idle")
+        if st.get("verifying"):
+            subtitle += " · " + t("ui.sub.verifying")
     elif state == "waiting":
         subtitle = t("ui.sub.waiting", reason=reason) if reason else t("ui.sub.plain.waiting")
     elif state == "held":
@@ -124,8 +129,14 @@ def row_view(pair: Pair, st: dict, service_up: bool, now: float | None = None) -
     else:
         subtitle = t(f"ui.sub.plain.{state}")
 
-
     icon, style = _LOOK.get(state, _LOOK["unknown"])
+    mismatch = int((st.get("verify") or {}).get("count", 0))
+    if mismatch and state == "idle":
+        subtitle = tn("ui.sub.mismatch", mismatch)
+        icon, style = _LOOK["held"]
+    if state in ("waiting", "held", "error") and (days := status.stale_days(pair, st, now)):
+        subtitle += " · " + tn("ui.sub.stale", days)
+        style = "error" if state == "error" else "warning"
     return RowView(
         pair_id=pair.id,
         title=folder_title(pair.source),
@@ -136,6 +147,7 @@ def row_view(pair: Pair, st: dict, service_up: bool, now: float | None = None) -
         paused=pair.paused,
         can_sync=service_up and not pair.paused and state not in ("syncing", "waiting"),
         held_count=int(held.get("count", 0)) if state == "held" else 0,
+        mismatch=mismatch,
         progress=progress,
         detail=detail,
         current=current,

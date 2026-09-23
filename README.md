@@ -32,6 +32,14 @@ to assume a disk may be unplugged at any time.
   treat them as files deleted in the source.
 - **Nothing is deleted outright.** Deleted and overwritten files are moved to
   `.whysync-trash/<time>/` inside the target and purged after 30 days.
+- **An overdue copy is reported.** If a pair has not finished a round for 7
+  days (the disk stayed unplugged, a round waits for approval, rsync keeps
+  failing), a desktop notification says so, once.
+- **Copies that go bad are caught.** Rounds compare size and date. Every 30
+  days the contents are compared as well, in the background, to find files
+  that changed inside without either changing (a failing disk). They are
+  listed and reported; `whysync repair` or Repair in the window copies the
+  source's version again and keeps the target's in the trash.
 - **Changes made while it was off are picked up.** A full check runs at
   start-up and every hour, and takes a couple of seconds on ~75k files.
 
@@ -47,8 +55,15 @@ in its name.
 
 ## Install
 
-Requires Python 3.11+, `rsync` and a systemd user session. The window also needs
-PyGObject with GTK 4 and libadwaita from your distribution (Arch:
+Arch Linux (AUR):
+
+```sh
+yay -S whysync
+systemctl --user enable --now whysync
+```
+
+From source: Python 3.11+, `rsync` and a systemd user session. The window also
+needs PyGObject with GTK 4 and libadwaita from your distribution (Arch:
 `python-gobject gtk4 libadwaita`, Debian/Ubuntu: `python3-gi gir1.2-adw-1`).
 
 ```sh
@@ -65,14 +80,21 @@ whysync                  # status
 whysync sync photos      # sync now
 whysync approve photos   # review and approve a held round
 whysync adopt photos     # first round: keep target-only files by copying them into the source
+whysync set photos --max-deletes 100 --exclude '*.tmp'   # show or change a pair's settings
+whysync repair photos    # copy again files whose contents differ from the source
 whysync pause photos | resume photos | remove photos
 whysync trash photos     # deleted / overwritten files, round by round
 whysync restore photos 2026-09-23T16-02-03 [PATH...]
 journalctl --user -u whysync -f
 ```
 
+Each pair has its own settings, in the window (Settings, inside a pair) or with
+`whysync set`: the deletion limit, how long the trash is kept, after how many
+days without a sync to warn, how often to compare contents, and patterns to
+skip. The folders themselves do not change; other folders are a new pair.
+
 Settings live in `~/.config/whysync/pairs.json`; the service picks up changes
-within a couple of seconds.
+within a couple of seconds. Changes between versions: [CHANGELOG](CHANGELOG.md).
 
 ## Languages
 

@@ -12,7 +12,7 @@ from whysync.ui.gi_ready import Adw, Gtk, Pango
 KINDS = (
     ("created", "document-new-symbolic", "ui.kind.created", "ui.kind.planned.created"),
     ("updated", "view-refresh-symbolic", "ui.kind.updated", "ui.kind.planned.updated"),
-    ("deleted", "user-trash-symbolic", "ui.kind.deleted", "ui.kind.planned.deleted"),
+    ("deleted", "user-trash-symbolic", "ui.kind.deleted", "ui.kind.planned.target_only"),
 )
 
 

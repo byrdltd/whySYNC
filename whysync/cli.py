@@ -7,7 +7,7 @@ import signal
 import sys
 import time
 
-from whysync import __version__, actions, config, trash
+from whysync import __version__, actions, config, status, trash
 from whysync.daemon import AlreadyRunning, Daemon
 from whysync.i18n import init_language, t, tn
 
@@ -53,6 +53,10 @@ def cmd_status(_args) -> int:
                               updated=last.get("updated", 0), deleted=last.get("deleted", 0)))
         if st.get("checked_at"):
             print("    " + t("cli.checked", at=_fmt_time(st["checked_at"])))
+        if (verify := st.get("verify") or {}).get("count"):
+            print("    " + tn("cli.mismatch", verify["count"], id=pair.id))
+        if days := status.stale_days(pair, st):
+            print("    " + tn("cli.stale", days, limit=pair.stale_days))
         if state == "held" and (held := st.get("held")):
             key = "cli.first_hint" if held.get("kind") == "first_round" else "cli.held_hint"
             print("    " + t(key, count=held.get("count", 0), id=pair.id))
@@ -76,6 +80,50 @@ def cmd_remove(args) -> int:
     except actions.ActionError as exc:
         return _fail(exc)
     print(t("cli.removed", id=pair.id))
+    return 0
+
+
+def cmd_repair(args) -> int:
+    if _load_config().find(args.id) is None:
+        return _fail(actions.ActionError("pair.unknown", id=args.id))
+    if actions.service_info() is None:
+        return _fail(actions.ActionError("cli.needs_daemon"))
+    verify = actions.pair_states().get(args.id, {}).get("verify") or {}
+    if not verify.get("count"):
+        print(t("cli.no_mismatch", id=args.id))
+        return 1
+    print(tn("cli.mismatch_list", verify["count"], id=args.id))
+    shown = verify.get("sample", [])[:HELD_SHOWN]
+    for path in shown:
+        print(f"  - {path}")
+    if verify["count"] > len(shown):
+        print("  " + t("cli.held_more", more=verify["count"] - len(shown)))
+    print(t("cli.repair_note"))
+    if not args.yes and input(t("cli.confirm")).strip().lower() not in ("y", "yes", "e", "evet"):
+        print(t("cli.cancelled"))
+        return 1
+    try:
+        actions.repair(args.id)
+    except actions.ActionError as exc:
+        return _fail(exc)
+    print(t("cli.repair_requested", id=args.id))
+    return 0
+
+
+def cmd_set(args) -> int:
+    numbers = {name: value for name, value in (("max_deletes", args.max_deletes), ("trash_days", args.trash_days),
+                                               ("stale_days", args.stale_days), ("verify_days", args.verify_days))
+               if value is not None}
+    excludes = [] if args.no_excludes else args.exclude
+    try:
+        if numbers or excludes is not None:
+            pair = actions.update_pair(args.id, excludes=excludes, **numbers)
+        elif (pair := _load_config().find(args.id)) is None:
+            raise actions.ActionError("pair.unknown", id=args.id)
+    except actions.ActionError as exc:
+        return _fail(exc)
+    print(t("cli.settings", id=pair.id, max_deletes=pair.max_deletes, trash_days=pair.trash_days,
+            stale_days=pair.stale_days, verify_days=pair.verify_days, excludes=", ".join(pair.excludes) or "—"))
     return 0
 
 
@@ -219,6 +267,21 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=t(f"cli.cmd.{name}"))
         p.add_argument("id")
         p.set_defaults(func=lambda a, _p=paused: _set_paused(a, _p))
+
+    settings = sub.add_parser("set", help=t("cli.cmd.set"))
+    settings.add_argument("id")
+    settings.add_argument("--max-deletes", type=int, help=t("cli.arg.max_deletes"))
+    settings.add_argument("--trash-days", type=int, help=t("cli.arg.trash_days"))
+    settings.add_argument("--stale-days", type=int, help=t("cli.arg.stale_days"))
+    settings.add_argument("--verify-days", type=int, help=t("cli.arg.verify_days"))
+    settings.add_argument("--exclude", action="append", help=t("cli.arg.exclude_set"))
+    settings.add_argument("--no-excludes", action="store_true", help=t("cli.arg.no_excludes"))
+    settings.set_defaults(func=cmd_set)
+
+    repair = sub.add_parser("repair", help=t("cli.cmd.repair"))
+    repair.add_argument("id")
+    repair.add_argument("-y", "--yes", action="store_true", help=t("cli.arg.yes"))
+    repair.set_defaults(func=cmd_repair)
 
     for name, adopt in (("approve", False), ("adopt", True)):
         p = sub.add_parser(name, help=t(f"cli.cmd.{name}"))

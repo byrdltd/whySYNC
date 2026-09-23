@@ -22,7 +22,7 @@ from pathlib import Path
 from whysync import engine, notify, status
 from whysync.config import Pair
 from whysync.fmt import done_summary
-from whysync.i18n import t
+from whysync.i18n import t, tn
 from whysync.inotify import Watcher, WatchLimitError
 from whysync.status import StatusBoard
 
@@ -35,6 +35,8 @@ PROGRESS_WRITE_S = 0.5
 LAST_SAMPLE = 50
 # Live mirroring makes many small rounds; only long ones deserve a desktop notification.
 NOTIFY_LONG_ROUND_S = 60.0
+# A content check that had to make way for a round tries again after this.
+VERIFY_RETRY_S = 600.0
 
 
 class PairWorker(threading.Thread):
@@ -64,6 +66,14 @@ class PairWorker(threading.Thread):
         self._adopted = 0
         self._progress: dict = {}
         self._progress_written = 0.0
+        self._stale_warned: float | None = None  # the checked_at we last warned about
+        # Content check (engine.verify) runs beside the watch loop and gives way to rounds.
+        self._verifier: threading.Thread | None = None
+        self._verify_proc: subprocess.Popen | None = None
+        self._verify_gen = 0
+        self._verify_started = 0.0
+        self._verify_after = 0.0
+        self._repair = False
 
     # --- external API (called from other threads) ---
 
@@ -77,12 +87,16 @@ class PairWorker(threading.Thread):
         """Copy the held round's target-only files into the source, then sync."""
         self._send(("adopt", fingerprint))
 
+    def repair(self) -> None:
+        """Run the next round by content, so files that differ only inside are copied again."""
+        self._send("repair")
+
     def stop(self, timeout: float = 15.0) -> None:
         self._stopping = True
         self._send("stop")
-        proc = self._proc
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
+        for proc in (self._proc, self._verify_proc):
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
         self.join(timeout)
 
     def _send(self, cmd) -> None:
@@ -101,6 +115,7 @@ class PairWorker(threading.Thread):
             log.exception("[%s] worker crashed", self.pair.id)
             self._set("error", reason="reason.internal")
         finally:
+            self._stop_verify()
             os.close(self._wake_r)
             os.close(self._wake_w)
 
@@ -113,6 +128,7 @@ class PairWorker(threading.Thread):
             reason = engine.readiness(self.pair)
             if reason:
                 self._set("waiting", reason=reason)
+                self._warn_if_stale()
                 self._wait([], self._poll_s)
                 continue
             # Adding a watch per directory walks the whole tree; on a cold
@@ -139,8 +155,12 @@ class PairWorker(threading.Thread):
         pending_since: float | None = None
         last_event = 0.0
         retry_at = self._retry_at(outcome)
+        last_ok = outcome.kind in ("done", "noop")
 
         while not self._stopping:
+            # Nothing to mirror right now: a good moment for a content check.
+            if last_ok and pending_since is None and not self._force and self._verify_due():
+                self._start_verify()
             now = self._clock()
             deadlines = [next_full]
             if pending_since is not None:
@@ -174,6 +194,7 @@ class PairWorker(threading.Thread):
                 return
             next_full = self._clock() + self.pair.full_sync_s
             retry_at = self._retry_at(outcome)
+            last_ok = outcome.kind in ("done", "noop")
 
     def _retry_at(self, outcome: engine.Outcome) -> float | None:
         if outcome.kind == "partial":
@@ -213,6 +234,11 @@ class PairWorker(threading.Thread):
             elif isinstance(cmd, tuple) and cmd[0] == "adopt":
                 self._adopt = cmd[1]
                 self._force = True
+            elif cmd == "repair":
+                self._repair = True
+                self._force = True
+            elif isinstance(cmd, tuple) and cmd[0] == "verified":
+                self._on_verified(cmd[1], cmd[2])
 
     # --- one round ---
 
@@ -220,10 +246,12 @@ class PairWorker(threading.Thread):
         self._progress: dict = {}
         self._progress_written = 0.0
         started = time.time()
+        self._stop_verify()  # a round goes first; the check tries again later
         self._adopt_held_files()
         first = status.first_round_pending(self.pair.id)
+        repair = self._repair
         outcome = engine.run_sync(self.pair, approved=self._approved, on_proc=self._track,
-                                  on_progress=self._on_progress, first_round=first)
+                                  on_progress=self._on_progress, first_round=first, checksum=repair)
         self._proc = None
         if self._stopping:
             # Paused, removed or shutting down: rsync was stopped on purpose,
@@ -232,6 +260,7 @@ class PairWorker(threading.Thread):
             return outcome
         if outcome.kind != "held":
             self._approved = None
+            self._repair = False
         now = time.time()
         pid = self.pair.id
 
@@ -259,6 +288,10 @@ class PairWorker(threading.Thread):
             self._held_plan = None
             if first:
                 status.set_first_round(pid, False)
+            if repair and outcome.kind != "partial":
+                # A round by content leaves both sides equal inside, too.
+                fields["verify"] = {"at": now, "count": 0, "sample": []}
+                self._set("idle", verify=fields["verify"])
         elif outcome.kind == "held":
             plan = outcome.plan
             deletions = plan.file_deletions
@@ -285,7 +318,86 @@ class PairWorker(threading.Thread):
                          t("notify.error_body", pair=pid, reason=t(outcome.reason)), "normal")
         else:
             self._set("waiting", reason=outcome.reason)
+        if outcome.kind not in ("done", "partial", "noop"):
+            self._warn_if_stale()
         return outcome
+
+    # --- content check ---
+
+    def _verify_due(self) -> bool:
+        if not self.pair.verify_days or self._verifier is not None or self._clock() < self._verify_after:
+            return False
+        record = self._board.get(self.pair.id).get("verify") or {}
+        last = record.get("at") or record.get("since")
+        if last is None:
+            # The period starts at the pair's first quiet moment rather than
+            # reading every file on both disks right after it is added.
+            self._board.update(self.pair.id, verify={"since": time.time()})
+            return False
+        return time.time() - last >= self.pair.verify_days * 86400
+
+    def _start_verify(self) -> None:
+        self._verify_gen += 1
+        gen, self._verify_started = self._verify_gen, time.time()
+
+        def work() -> None:
+            result = engine.verify(self.pair, on_proc=self._track_verify)
+            self._send(("verified", gen, result))
+
+        log.info("[%s] content check started", self.pair.id)
+        self._board.update(self.pair.id, verifying=self._verify_started)
+        self._verifier = threading.Thread(target=work, daemon=True, name=f"verify-{self.pair.id}")
+        self._verifier.start()
+
+    def _track_verify(self, proc: subprocess.Popen) -> None:
+        self._verify_proc = proc
+        if self._stopping:
+            proc.terminate()
+
+    def _stop_verify(self) -> None:
+        worker = self._verifier
+        if worker is None:
+            return
+        self._verify_gen += 1  # whatever it reports now is stale
+        proc = self._verify_proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+        worker.join()
+        self._verifier = self._verify_proc = None
+        self._verify_after = self._clock() + VERIFY_RETRY_S
+        self._board.update(self.pair.id, verifying=None)
+        log.info("[%s] content check stopped for a round; retrying later", self.pair.id)
+
+    def _on_verified(self, gen: int, result: list[str] | engine.Outcome) -> None:
+        if gen != self._verify_gen:
+            return
+        if self._verifier is not None:
+            self._verifier.join()
+        self._verifier = self._verify_proc = None
+        self._board.update(self.pair.id, verifying=None)
+        if isinstance(result, engine.Outcome):
+            self._verify_after = self._clock() + VERIFY_RETRY_S
+            log.info("[%s] content check did not finish: %s", self.pair.id, result.reason)
+            return
+        record = {"at": self._verify_started, "count": len(result), "sample": result[:HELD_SAMPLE]}
+        self._board.update(self.pair.id, verify=record)
+        log.info("[%s] content check: %d files differ", self.pair.id, len(result))
+        if result:
+            name = Path(self.pair.source).name
+            self._notifier(tn("notify.verify_title", len(result), name=name),
+                           t("notify.verify_body", pair=self.pair.id), "critical")
+
+    def _warn_if_stale(self) -> None:
+        """One notification per stretch without a finished round, once it passes the limit."""
+        st = self._board.get(self.pair.id)
+        days = status.stale_days(self.pair, st)
+        if not days or self._stale_warned == st.get("checked_at"):
+            return
+        self._stale_warned = st.get("checked_at")
+        name = Path(self.pair.source).name
+        log.warning("[%s] no finished round for %d days (%s)", self.pair.id, days, st.get("reason"))
+        self._notifier(tn("notify.stale_title", days, name=name),
+                       tn("notify.stale_body", days, reason=t(st.get("reason")) or t("state.unknown")), "normal")
 
     def _adopt_held_files(self) -> None:
         wanted, self._adopt = self._adopt, None

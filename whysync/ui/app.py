@@ -11,6 +11,7 @@ from whysync.ui.approve_dialog import ApproveDialog
 from whysync.ui.detail import DetailHandlers, PairDetail
 from whysync.ui.gi_ready import Adw, Gio, GLib, Gtk
 from whysync.ui.model import folder_title, row_view
+from whysync.ui.settings_dialog import SettingsDialog
 from whysync.ui.sidebar_row import SidebarRow
 from whysync.ui.trash_dialog import TrashDialog
 
@@ -70,7 +71,8 @@ class MainWindow(Adw.ApplicationWindow):
 
         self._detail = PairDetail(DetailHandlers(
             sync=self._sync, pause=self._pause, review=self._review,
-            remove=self._remove, trash=self._trash, open_folder=self._open_folder,
+            remove=self._remove, trash=self._trash, settings=self._settings, repair=self._repair,
+            open_folder=self._open_folder,
         ))
         empty_add = Gtk.Button(label=t("ui.add.title"), halign=Gtk.Align.CENTER)
         empty_add.add_css_class("suggested-action")
@@ -244,6 +246,28 @@ class MainWindow(Adw.ApplicationWindow):
         if pair is None:
             return None
         dialog = TrashDialog(pair, self.toast)
+        dialog.present(self)
+        return dialog
+
+    def _repair(self, pid: str) -> None:
+        self._run(lambda: actions.repair(pid), "ui.repair_requested")
+
+    def _settings(self, pid: str) -> SettingsDialog | None:
+        pair = self._pairs.get(pid)
+        if pair is None:
+            return None
+
+        def save(values: dict) -> bool:
+            try:
+                actions.update_pair(pid, **values)
+            except actions.ActionError as exc:
+                self.toast(t(exc.key, **exc.params))
+                return False
+            self.toast(t("ui.settings.saved"))
+            self.refresh()
+            return True
+
+        dialog = SettingsDialog(pair, save)
         dialog.present(self)
         return dialog
 
