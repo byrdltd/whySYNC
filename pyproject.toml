@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whysync"
+dynamic = ["version"]
+description = "Live one-way folder mirror for Linux: inotify + rsync with safety gates."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "byrdltd" }]
+dependencies = []
+
+[project.scripts]
+whysync = "whysync.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/byrdltd/whySYNC"
+
+[tool.setuptools.dynamic]
+version = { attr = "whysync.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["whysync*"]

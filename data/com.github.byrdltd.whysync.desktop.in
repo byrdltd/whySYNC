@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=whySYNC
+Comment=Live one-way folder mirror
+Comment[tr]=Canlı, tek yönlü klasör aynası
+Exec=@BIN@ gui
+Icon=com.github.byrdltd.whysync
+Terminal=false
+Categories=Utility;FileTools;
+Keywords=sync;mirror;backup;rsync;disk;
+Keywords[tr]=eşitle;ayna;yedek;rsync;disk;
+StartupNotify=true

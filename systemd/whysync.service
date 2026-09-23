@@ -1,0 +1,16 @@
+[Unit]
+Description=whySYNC live one-way folder mirror
+Documentation=https://github.com/byrdltd/whySYNC
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/whysync daemon
+Restart=on-failure
+RestartSec=10
+# Keep large copies from slowing the desktop down.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=default.target
