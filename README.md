@@ -9,6 +9,13 @@
   <i>Live one-way folder mirror. Linux, systemd, rsync.</i>
 </p>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshot-dark.png">
+    <img src="assets/screenshot-light.png" alt="whySYNC window" width="760">
+  </picture>
+</p>
+
 Live one-way folder mirror for Linux. When something changes in the source
 folder, whySYNC waits for writes to settle and mirrors the source onto the
 target with rsync. It runs as a systemd user service and keeps working with no
